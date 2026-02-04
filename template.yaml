@@ -1,0 +1,141 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Epic to Sprint Planner - Document Processing Pipeline
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 300
+    MemorySize: 1024
+    Environment:
+      Variables:
+        INPUT_BUCKET: !Ref InputBucket
+        OUTPUT_BUCKET: !Ref OutputBucket
+        BEDROCK_MODEL_ID: anthropic.claude-3-5-sonnet-20241022-v2:0
+
+Resources:
+  # S3 Buckets
+  InputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-input-${AWS::AccountId}'
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt ChunkerFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .pdf
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt ChunkerFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .docx
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt ChunkerFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .md
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt ChunkerFunction.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .txt
+
+  OutputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-output-${AWS::AccountId}'
+
+  # Lambda Functions
+  ChunkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-Chunker'
+      CodeUri: src/lambdas/chunker/
+      Handler: handler.lambda_handler
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref InputBucket
+        - S3CrudPolicy:
+            BucketName: !Ref OutputBucket
+      Environment:
+        Variables:
+          CHUNK_SIZE: '4000'
+          OVERLAP_SIZE: '200'
+
+  StoryGeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-StoryGenerator'
+      CodeUri: src/lambdas/story_generator/
+      Handler: handler.lambda_handler
+      Timeout: 600
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref OutputBucket
+        - S3CrudPolicy:
+            BucketName: !Ref OutputBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource: !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/*'
+
+  AggregatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-Aggregator'
+      CodeUri: src/lambdas/aggregator/
+      Handler: handler.lambda_handler
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref OutputBucket
+        - S3CrudPolicy:
+            BucketName: !Ref OutputBucket
+
+  # Lambda Permissions
+  ChunkerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt ChunkerFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt InputBucket.Arn
+
+  # Step Functions State Machine (Phase 2)
+  # ProcessingStateMachine:
+  #   Type: AWS::Serverless::StateMachine
+  #   Properties:
+  #     DefinitionUri: statemachine/pipeline.asl.json
+  #     Role: !GetAtt StateMachineRole.Arn
+
+Outputs:
+  InputBucketName:
+    Description: Input S3 Bucket
+    Value: !Ref InputBucket
+
+  OutputBucketName:
+    Description: Output S3 Bucket
+    Value: !Ref OutputBucket
+
+  ChunkerFunctionArn:
+    Description: Chunker Lambda Function ARN
+    Value: !GetAtt ChunkerFunction.Arn
+
+  StoryGeneratorFunctionArn:
+    Description: Story Generator Lambda Function ARN
+    Value: !GetAtt StoryGeneratorFunction.Arn
+
+  AggregatorFunctionArn:
+    Description: Aggregator Lambda Function ARN
+    Value: !GetAtt AggregatorFunction.Arn
